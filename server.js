@@ -214,33 +214,51 @@ app.post('/history/save', async (req, res) => {
     const { idalat, duration } = req.body;
 
     try {
-        // Fetch the first updated_at for the specified idalat
-        const sql = 'SELECT updated_at FROM monitoring WHERE idalat = $1 ORDER BY updated_at ASC LIMIT 1';
-        const result = await db.query(sql, [idalat]);
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'No data found for this alat' });
+        // Validasi input
+        if (!idalat || !duration) {
+            return res.status(400).json({ 
+                error: 'idalat dan duration harus diisi' 
+            });
         }
 
-        const createdAt = result.rows[0].updated_at;
+        // Cek apakah ada data monitoring
+        const checkSql = 'SELECT COUNT(*) FROM monitoring WHERE idalat = $1';
+        const checkResult = await db.query(checkSql, [idalat]);
+        
+        if (parseInt(checkResult.rows[0].count) === 0) {
+            return res.status(404).json({ 
+                error: 'Tidak ada data monitoring untuk alat ini' 
+            });
+        }
 
-        // Save history data to the database
-        const sqlInsert = 'INSERT INTO history (idalat, created_at, duration) VALUES ($1, $2, $3)';
-        await db.query(sqlInsert, [idalat, createdAt, duration]);
+        // Ambil waktu terakhir dari monitoring
+        const lastTimeSql = 'SELECT updated_at FROM monitoring WHERE idalat = $1 ORDER BY updated_at DESC LIMIT 1';
+        const timeResult = await db.query(lastTimeSql, [idalat]);
+        const lastUpdateTime = timeResult.rows[0].updated_at;
 
-        // Delete all data from monitoring table for the specified idalat
+        // Simpan ke history
+        const insertSql = `
+            INSERT INTO history (idalat, created_at, duration) 
+            VALUES ($1, $2, $3) 
+            RETURNING id, idalat, created_at, duration
+        `;
+        const historyResult = await db.query(insertSql, [idalat, lastUpdateTime, duration]);
+
+        // Hapus data monitoring
         const deleteSql = 'DELETE FROM monitoring WHERE idalat = $1';
-        const deleteResult = await db.query(deleteSql, [idalat]);
+        await db.query(deleteSql, [idalat]);
 
-        if (deleteResult.rowCount === 0) {
-            console.error('Error deleting data from monitoring table:', 'No rows affected');
-            return res.status(500).json({ error: 'Error deleting data from monitoring table', details: 'No rows affected' });
-        }
+        res.status(201).json({
+            message: 'History berhasil disimpan',
+            data: historyResult.rows[0]
+        });
 
-        res.status(201).json({ message: 'History saved successfully' });
     } catch (err) {
-        console.error('Error saving history:', err);
-        res.status(500).json({ error: 'Error saving history', details: err.message });
+        console.error('Error menyimpan history:', err);
+        res.status(500).json({ 
+            error: 'Gagal menyimpan history', 
+            details: err.message 
+        });
     }
 });
 
@@ -249,22 +267,53 @@ app.get('/history/:idalat', async (req, res) => {
     const { idalat } = req.params;
 
     try {
-        const sql = `SELECT 
-            TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
-            duration 
-            FROM history 
-            WHERE idalat = $1 
-            ORDER BY created_at ASC`;
-        const result = await db.query(sql, [idalat]);
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'No history found for this alat' });
+        // Validasi input
+        if (!idalat) {
+            return res.status(400).json({ 
+                error: 'idalat harus diisi' 
+            });
         }
 
-        res.status(200).json({ history: result.rows });
+        // Query untuk mengambil history dengan format tanggal yang sesuai
+        const sql = `
+            SELECT 
+                id,
+                idalat,
+                TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
+                duration
+            FROM history 
+            WHERE idalat = $1 
+            ORDER BY created_at DESC
+            LIMIT 50
+        `;
+        
+        const result = await db.query(sql, [idalat]);
+
+        // Jika tidak ada data
+        if (result.rows.length === 0) {
+            return res.json({ 
+                message: 'Tidak ada history',
+                history: [] 
+            });
+        }
+
+        // Format response
+        res.json({
+            message: 'Data history berhasil diambil',
+            history: result.rows.map(row => ({
+                id: row.id,
+                idalat: row.idalat,
+                created_at: row.created_at,
+                duration: parseInt(row.duration)
+            }))
+        });
+
     } catch (err) {
-        console.error('Error fetching history:', err);
-        res.status(500).json({ error: 'Error fetching history', details: err.message });
+        console.error('Error mengambil history:', err);
+        res.status(500).json({ 
+            error: 'Gagal mengambil history', 
+            details: err.message 
+        });
     }
 });
 
