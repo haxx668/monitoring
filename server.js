@@ -10,13 +10,19 @@ const cors = require('cors'); // Import cors middleware
 const app = express();
 
 // Enable CORS for all routes and origins (or specify allowed origins)
-app.use(cors());
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    credentials: true
+}));
+  
 
 // Parse JSON request bodies
 app.use(bodyParser.json());
 
 // Environment Variables
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 const CONNECTION_STRING = process.env.DATABASE_URL || 'postgres://postgres.hhfetohqcseicbspsbbi:qw123qew132rr254@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres';
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey';
 
@@ -214,51 +220,37 @@ app.post('/history/save', async (req, res) => {
     const { idalat, duration } = req.body;
 
     try {
-        // Validasi input
-        if (!idalat || !duration) {
-            return res.status(400).json({ 
-                error: 'idalat dan duration harus diisi' 
-            });
+        // Fetch the first updated_at for the specified idalat
+        const sql = 'SELECT updated_at FROM monitoring WHERE idalat = $1 ORDER BY updated_at ASC LIMIT 1';
+        const result = await db.query(sql, [idalat]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'No data found for this alat' });
         }
 
-        // Cek apakah ada data monitoring
-        const checkSql = 'SELECT COUNT(*) FROM monitoring WHERE idalat = $1';
-        const checkResult = await db.query(checkSql, [idalat]);
-        
-        if (parseInt(checkResult.rows[0].count) === 0) {
-            return res.status(404).json({ 
-                error: 'Tidak ada data monitoring untuk alat ini' 
-            });
-        }
+        const createdAt = result.rows[0].updated_at;
 
-        // Ambil waktu terakhir dari monitoring
-        const lastTimeSql = 'SELECT updated_at FROM monitoring WHERE idalat = $1 ORDER BY updated_at DESC LIMIT 1';
-        const timeResult = await db.query(lastTimeSql, [idalat]);
-        const lastUpdateTime = timeResult.rows[0].updated_at;
+        // Ubah timezone ke UTC+7
+        const timezoneOffset = 7 * 60 * 60 * 1000; // 7 jam dalam milisecond
+        const createdAtJakarta = new Date(createdAt.getTime() + timezoneOffset);
 
-        // Simpan ke history
-        const insertSql = `
-            INSERT INTO history (idalat, created_at, duration) 
-            VALUES ($1, $2, $3) 
-            RETURNING id, idalat, created_at, duration
-        `;
-        const historyResult = await db.query(insertSql, [idalat, lastUpdateTime, duration]);
+        // Save history data to the database
+        const sqlInsert = 'INSERT INTO history (idalat, created_at, duration) VALUES ($1, $2, $3)';
+        await db.query(sqlInsert, [idalat, createdAtJakarta, duration]);
 
-        // Hapus data monitoring
+        // Delete all data from monitoring table for the specified idalat
         const deleteSql = 'DELETE FROM monitoring WHERE idalat = $1';
-        await db.query(deleteSql, [idalat]);
+        const deleteResult = await db.query(deleteSql, [idalat]);
 
-        res.status(201).json({
-            message: 'History berhasil disimpan',
-            data: historyResult.rows[0]
-        });
+        if (deleteResult.rowCount === 0) {
+            console.error('Error deleting data from monitoring table:', 'No rows affected');
+            return res.status(500).json({ error: 'Error deleting data from monitoring table', details: 'No rows affected' });
+        }
 
+        res.status(201).json({ message: 'History saved successfully' });
     } catch (err) {
-        console.error('Error menyimpan history:', err);
-        res.status(500).json({ 
-            error: 'Gagal menyimpan history', 
-            details: err.message 
-        });
+        console.error('Error saving history:', err);
+        res.status(500).json({ error: 'Error saving history', details: err.message });
     }
 });
 
@@ -267,58 +259,27 @@ app.get('/history/:idalat', async (req, res) => {
     const { idalat } = req.params;
 
     try {
-        // Validasi input
-        if (!idalat) {
-            return res.status(400).json({ 
-                error: 'idalat harus diisi' 
-            });
-        }
-
-        // Query untuk mengambil history dengan format tanggal yang sesuai
-        const sql = `
-            SELECT 
-                id,
-                idalat,
-                TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
-                duration
+        const sql = `SELECT 
+            TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+            duration 
             FROM history 
             WHERE idalat = $1 
-            ORDER BY created_at DESC
-            LIMIT 50
-        `;
-        
+            ORDER BY created_at ASC`;
         const result = await db.query(sql, [idalat]);
 
-        // Jika tidak ada data
         if (result.rows.length === 0) {
-            return res.json({ 
-                message: 'Tidak ada history',
-                history: [] 
-            });
+            return res.status(404).json({ error: 'No history found for this alat' });
         }
 
-        // Format response
-        res.json({
-            message: 'Data history berhasil diambil',
-            history: result.rows.map(row => ({
-                id: row.id,
-                idalat: row.idalat,
-                created_at: row.created_at,
-                duration: parseInt(row.duration)
-            }))
-        });
-
+        res.status(200).json({ history: result.rows });
     } catch (err) {
-        console.error('Error mengambil history:', err);
-        res.status(500).json({ 
-            error: 'Gagal mengambil history', 
-            details: err.message 
-        });
+        console.error('Error fetching history:', err);
+        res.status(500).json({ error: 'Error fetching history', details: err.message });
     }
 });
 
 // Start the Server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT} 🖥️`);
 });
 
